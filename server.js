@@ -1,7 +1,12 @@
 // 필요한 도구들을 가져와요
+require("dotenv").config(); // 환경 변수 로드
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
+const FormData = require("form-data");
+
+// 환경 변수 설정 (배포 환경을 위한 설정)
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || ""; // 실제 배포 시 환경 변수로 설정
 
 // 서버 만들기
 const app = express();
@@ -107,41 +112,73 @@ app.post("/api/slack-command", async (req, res) => {
       text: `${width}x${height} 크기의 랜덤 이미지를 생성 중입니다...`,
     });
 
-    // 이미지 URL 생성
-    const imageUrl = `https://random-image-server-dcq3.onrender.com/api/random-image?width=${width}&height=${height}`;
+    try {
+      // 이미지 URL 생성
+      const imageUrl = `https://picsum.photos/${width}/${height}?random=${Math.floor(
+        Math.random() * 1000
+      )}`;
 
-    // 슬랙 API를 사용하여 메시지 업데이트
-    const message = {
-      response_type: "in_channel",
-      blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `*${width}x${height}* 크기의 랜덤 이미지입니다!`,
-          },
-        },
-        {
-          type: "image",
-          title: {
-            type: "plain_text",
-            text: "랜덤 이미지",
-          },
-          image_url: imageUrl,
-          alt_text: "랜덤 이미지",
-        },
-      ],
-    };
+      // 이미지 가져오기
+      const imageResponse = await fetch(imageUrl);
+      const imageBuffer = await imageResponse.buffer();
 
-    // response_url을 사용하여 메시지 업데이트
-    if (response_url) {
-      await fetch(response_url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(message),
-      });
+      // 슬랙 토큰 확인
+      if (SLACK_BOT_TOKEN) {
+        // FormData 객체 생성
+        const formData = new FormData();
+        formData.append("file", imageBuffer, {
+          filename: `random-${Date.now()}.jpg`,
+        });
+        formData.append("channels", channel_id);
+        formData.append(
+          "initial_comment",
+          `${width}x${height} 크기의 랜덤 이미지입니다`
+        );
+
+        // 슬랙 API를 사용하여 파일 업로드
+        const uploadResponse = await fetch(
+          "https://slack.com/api/files.upload",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+            },
+            body: formData,
+          }
+        );
+
+        const uploadResult = await uploadResponse.json();
+        if (!uploadResult.ok) {
+          throw new Error(`슬랙 파일 업로드 오류: ${uploadResult.error}`);
+        }
+      } else {
+        // 토큰이 없는 경우 일반 메시지로 대체
+        await fetch(response_url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            response_type: "in_channel",
+            text: `${width}x${height} 크기의 랜덤 이미지입니다: ${imageUrl}`,
+          }),
+        });
+      }
+    } catch (error) {
+      console.error("이미지 처리 오류:", error);
+      // 오류 발생 시 메시지 업데이트
+      if (response_url) {
+        await fetch(response_url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            response_type: "in_channel",
+            text: "이미지를 생성하는 중에 문제가 발생했습니다 :(",
+          }),
+        });
+      }
     }
   } catch (error) {
     console.error("슬랙 명령어 처리 오류:", error);
