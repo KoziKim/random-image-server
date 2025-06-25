@@ -93,7 +93,19 @@ app.get("/api/random-image", async (req, res) => {
 app.post("/api/slack-command", async (req, res) => {
   try {
     // 슬랙에서 보낸 데이터 확인
-    const { text, response_url, channel_id } = req.body;
+    const {
+      text,
+      response_url,
+      channel_id,
+      channel_name,
+      user_id,
+      user_name,
+      command,
+    } = req.body;
+
+    console.log(
+      `슬랙 명령어 수신: ${command} by ${user_name} in #${channel_name} (${channel_id})`
+    );
 
     // 기본 이미지 크기 설정
     let width = 500;
@@ -118,51 +130,102 @@ app.post("/api/slack-command", async (req, res) => {
         Math.random() * 1000
       )}`;
 
+      console.log(`이미지 URL 생성: ${imageUrl}`);
+
       // 이미지 가져오기
+      console.log("이미지 다운로드 시작...");
       const imageResponse = await fetch(imageUrl);
       const imageBuffer = await imageResponse.buffer();
+      console.log(`이미지 다운로드 완료: ${imageBuffer.length} bytes`);
 
       // 슬랙 토큰 확인
-      if (SLACK_BOT_TOKEN) {
-        // FormData 객체 생성
-        const formData = new FormData();
-        formData.append("file", imageBuffer, {
-          filename: `random-${Date.now()}.jpg`,
-        });
-        formData.append("channels", channel_id);
-        formData.append(
-          "initial_comment",
-          `${width}x${height} 크기의 랜덤 이미지입니다`
+      if (!SLACK_BOT_TOKEN) {
+        console.log(
+          "SLACK_BOT_TOKEN이 설정되지 않았습니다. 이미지 URL만 전송합니다."
         );
-
-        // 슬랙 API를 사용하여 파일 업로드
-        const uploadResponse = await fetch(
-          "https://slack.com/api/files.upload",
-          {
+        // 토큰이 없는 경우 일반 메시지로 대체
+        if (response_url) {
+          await fetch(response_url, {
             method: "POST",
             headers: {
-              Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+              "Content-Type": "application/json",
             },
-            body: formData,
-          }
-        );
+            body: JSON.stringify({
+              response_type: "in_channel",
+              text: `${width}x${height} 크기의 랜덤 이미지입니다: ${imageUrl}`,
+            }),
+          });
+        }
+        return;
+      }
 
-        const uploadResult = await uploadResponse.json();
-        if (!uploadResult.ok) {
-          throw new Error(`슬랙 파일 업로드 오류: ${uploadResult.error}`);
+      console.log("파일 업로드 시작...");
+
+      // FormData 객체 생성
+      const formData = new FormData();
+      formData.append("file", imageBuffer, {
+        filename: `random-${width}x${height}-${Date.now()}.jpg`,
+      });
+      formData.append("channels", channel_id); // 채널 ID 사용
+      formData.append(
+        "initial_comment",
+        `${width}x${height} 크기의 랜덤 이미지입니다`
+      );
+
+      // 슬랙 API를 사용하여 파일 업로드
+      const uploadResponse = await fetch("https://slack.com/api/files.upload", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+        },
+        body: formData,
+      });
+
+      const uploadResult = await uploadResponse.json();
+
+      if (!uploadResult.ok) {
+        console.error(`슬랙 파일 업로드 오류: ${uploadResult.error}`);
+        console.error("오류 세부 정보:", JSON.stringify(uploadResult));
+
+        // 파일 업로드 실패 시 대체 메시지 전송
+        if (response_url) {
+          await fetch(response_url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              response_type: "in_channel",
+              blocks: [
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: `*${width}x${height}* 크기의 랜덤 이미지입니다!`,
+                  },
+                },
+                {
+                  type: "image",
+                  title: {
+                    type: "plain_text",
+                    text: "랜덤 이미지",
+                  },
+                  image_url: imageUrl,
+                  alt_text: "랜덤 이미지",
+                },
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: `이미지를 저장하려면 <${imageUrl}|여기를 클릭하세요> (새 탭에서 열고 우클릭 후 '이미지 저장')`,
+                  },
+                },
+              ],
+            }),
+          });
         }
       } else {
-        // 토큰이 없는 경우 일반 메시지로 대체
-        await fetch(response_url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            response_type: "in_channel",
-            text: `${width}x${height} 크기의 랜덤 이미지입니다: ${imageUrl}`,
-          }),
-        });
+        console.log("파일 업로드 성공!");
       }
     } catch (error) {
       console.error("이미지 처리 오류:", error);
