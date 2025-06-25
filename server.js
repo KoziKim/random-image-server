@@ -4,15 +4,28 @@ const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
 const FormData = require("form-data");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
 
 // 환경 변수 설정 (배포 환경을 위한 설정)
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || ""; // 실제 배포 시 환경 변수로 설정
+const BASE_URL = process.env.BASE_URL || "http://localhost:3000"; // 서버의 기본 URL
 
 // 서버 만들기
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// 이미지를 저장할 디렉토리 생성
+const uploadsDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// 정적 파일 서빙을 위한 미들웨어 설정
+app.use("/uploads", express.static(uploadsDir));
 
 // 메인 페이지 만들기
 app.get("/", (req, res) => {
@@ -89,6 +102,25 @@ app.get("/api/random-image", async (req, res) => {
   }
 });
 
+// 이미지 다운로드 엔드포인트
+app.get("/download/:filename", (req, res) => {
+  const filename = req.params.filename;
+  const filePath = path.join(uploadsDir, filename);
+
+  // 파일이 존재하는지 확인
+  if (fs.existsSync(filePath)) {
+    // 다운로드를 위한 헤더 설정
+    res.setHeader("Content-Disposition", `attachment; filename=${filename}`);
+    res.setHeader("Content-Type", "image/jpeg");
+
+    // 파일 스트림 생성 및 응답으로 전송
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
+  } else {
+    res.status(404).send("파일을 찾을 수 없습니다.");
+  }
+});
+
 // 슬랙 슬래시 명령어 처리 엔드포인트
 app.post("/api/slack-command", async (req, res) => {
   try {
@@ -138,94 +170,64 @@ app.post("/api/slack-command", async (req, res) => {
       const imageBuffer = await imageResponse.buffer();
       console.log(`이미지 다운로드 완료: ${imageBuffer.length} bytes`);
 
-      // 슬랙 토큰 확인
-      if (!SLACK_BOT_TOKEN) {
-        console.log(
-          "SLACK_BOT_TOKEN이 설정되지 않았습니다. 이미지 URL만 전송합니다."
-        );
-        // 토큰이 없는 경우 일반 메시지로 대체
-        if (response_url) {
-          await fetch(response_url, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              response_type: "in_channel",
-              text: `${width}x${height} 크기의 랜덤 이미지입니다: ${imageUrl}`,
-            }),
-          });
-        }
-        return;
-      }
+      // 고유한 파일명 생성
+      const filename = `random-${width}x${height}-${Date.now()}-${crypto
+        .randomBytes(4)
+        .toString("hex")}.jpg`;
+      const filePath = path.join(uploadsDir, filename);
 
-      console.log("파일 업로드 시작...");
+      // 이미지를 서버에 저장
+      fs.writeFileSync(filePath, imageBuffer);
+      console.log(`이미지를 서버에 저장: ${filePath}`);
 
-      // FormData 객체 생성
-      const formData = new FormData();
-      formData.append("file", imageBuffer, {
-        filename: `random-${width}x${height}-${Date.now()}.jpg`,
-      });
-      formData.append("channels", channel_id); // 채널 ID 사용
-      formData.append(
-        "initial_comment",
-        `${width}x${height} 크기의 랜덤 이미지입니다`
-      );
+      // 이미지 URL과 다운로드 URL 생성
+      const serverImageUrl = `${BASE_URL}/uploads/${filename}`;
+      const downloadUrl = `${BASE_URL}/download/${filename}`;
 
-      // 슬랙 API를 사용하여 파일 업로드
-      const uploadResponse = await fetch("https://slack.com/api/files.upload", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
-        },
-        body: formData,
-      });
-
-      const uploadResult = await uploadResponse.json();
-
-      if (!uploadResult.ok) {
-        console.error(`슬랙 파일 업로드 오류: ${uploadResult.error}`);
-        console.error("오류 세부 정보:", JSON.stringify(uploadResult));
-
-        // 파일 업로드 실패 시 대체 메시지 전송
-        if (response_url) {
-          await fetch(response_url, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              response_type: "in_channel",
-              blocks: [
-                {
-                  type: "section",
-                  text: {
-                    type: "mrkdwn",
-                    text: `*${width}x${height}* 크기의 랜덤 이미지입니다!`,
-                  },
+      // 슬랙 API를 사용하여 메시지 전송
+      if (response_url) {
+        await fetch(response_url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            response_type: "in_channel",
+            blocks: [
+              {
+                type: "section",
+                text: {
+                  type: "mrkdwn",
+                  text: `*${width}x${height}* 크기의 랜덤 이미지입니다!`,
                 },
-                {
-                  type: "image",
-                  title: {
-                    type: "plain_text",
-                    text: "랜덤 이미지",
-                  },
-                  image_url: imageUrl,
-                  alt_text: "랜덤 이미지",
+              },
+              {
+                type: "image",
+                title: {
+                  type: "plain_text",
+                  text: "랜덤 이미지",
                 },
-                {
-                  type: "section",
-                  text: {
-                    type: "mrkdwn",
-                    text: `이미지를 저장하려면 <${imageUrl}|여기를 클릭하세요> (새 탭에서 열고 우클릭 후 '이미지 저장')`,
+                image_url: serverImageUrl,
+                alt_text: "랜덤 이미지",
+              },
+              {
+                type: "actions",
+                elements: [
+                  {
+                    type: "button",
+                    text: {
+                      type: "plain_text",
+                      text: "이미지 다운로드",
+                    },
+                    url: downloadUrl,
+                    action_id: "download_image",
                   },
-                },
-              ],
-            }),
-          });
-        }
-      } else {
-        console.log("파일 업로드 성공!");
+                ],
+              },
+            ],
+          }),
+        });
+        console.log("슬랙 메시지 전송 완료");
       }
     } catch (error) {
       console.error("이미지 처리 오류:", error);
@@ -260,4 +262,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`서버가 ${PORT} 포트에서 실행 중이에요!`);
   console.log(`웹 브라우저에서 http://localhost:${PORT} 주소로 접속해보세요!`);
+  console.log(`업로드 디렉토리: ${uploadsDir}`);
 });
