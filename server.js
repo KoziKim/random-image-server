@@ -7,6 +7,7 @@ const fetch = require("node-fetch");
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // 메인 페이지 만들기
 app.get("/", (req, res) => {
@@ -80,6 +81,77 @@ app.get("/api/random-image", async (req, res) => {
   } catch (error) {
     console.error("에러 발생:", error);
     res.status(500).send("이미지를 가져오다가 문제가 생겼어요 :(");
+  }
+});
+
+// 슬랙 슬래시 명령어 처리 엔드포인트
+app.post("/api/slack-command", async (req, res) => {
+  try {
+    // 슬랙에서 보낸 데이터 확인
+    const { text, response_url, channel_id } = req.body;
+
+    // 기본 이미지 크기 설정
+    let width = 500;
+    let height = 500;
+
+    // 사용자가 크기를 입력했는지 확인
+    if (text && text.trim()) {
+      const dimensions = text.split(" ");
+      if (dimensions.length >= 1) width = parseInt(dimensions[0]) || 500;
+      if (dimensions.length >= 2) height = parseInt(dimensions[1]) || 500;
+    }
+
+    // 즉시 응답 (슬랙 타임아웃 방지)
+    res.status(200).send({
+      response_type: "in_channel",
+      text: `${width}x${height} 크기의 랜덤 이미지를 생성 중입니다...`,
+    });
+
+    // 이미지 URL 생성
+    const imageUrl = `https://random-image-server-dcq3.onrender.com/api/random-image?width=${width}&height=${height}`;
+
+    // 슬랙 API를 사용하여 메시지 업데이트
+    const message = {
+      response_type: "in_channel",
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*${width}x${height}* 크기의 랜덤 이미지입니다!`,
+          },
+        },
+        {
+          type: "image",
+          title: {
+            type: "plain_text",
+            text: "랜덤 이미지",
+          },
+          image_url: imageUrl,
+          alt_text: "랜덤 이미지",
+        },
+      ],
+    };
+
+    // response_url을 사용하여 메시지 업데이트
+    if (response_url) {
+      await fetch(response_url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(message),
+      });
+    }
+  } catch (error) {
+    console.error("슬랙 명령어 처리 오류:", error);
+    // 오류가 발생해도 슬랙에는 200 응답을 보내야 함
+    if (!res.headersSent) {
+      res.status(200).send({
+        response_type: "ephemeral",
+        text: "이미지를 생성하는 중에 문제가 발생했습니다 :(",
+      });
+    }
   }
 });
 
