@@ -157,62 +157,93 @@ app.post("/api/slack-command", async (req, res) => {
 
       console.log(`이미지 URL 생성: ${imageUrl}`);
 
-      // 이미지 가져오기
+      // 이미지 다운로드
       console.log("이미지 다운로드 시작...");
       const imageResponse = await fetch(imageUrl);
       const imageBuffer = await imageResponse.buffer();
       console.log(`이미지 다운로드 완료: ${imageBuffer.length} bytes`);
 
-      // 슬랙 API를 사용하여 이미지 직접 업로드 (파일 업로드)
       if (SLACK_BOT_TOKEN) {
-        console.log("슬랙에 이미지 업로드 시도...");
+        try {
+          // 1. 파일 업로드 URL 가져오기
+          console.log("슬랙 파일 업로드 URL 요청 중...");
+          const filename = `random-${width}x${height}-${Date.now()}.jpg`;
 
-        // 채널 ID가 있는지 확인
-        if (!channel_id) {
-          console.error("채널 ID가 없습니다. 응답 URL로 메시지만 전송합니다.");
-          if (response_url) {
-            await fetch(response_url, {
+          const uploadUrlResponse = await fetch(
+            "https://slack.com/api/files.getUploadURLExternal",
+            {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                response_type: "in_channel",
-                text: `${width}x${height} 크기의 랜덤 이미지: ${imageUrl}`,
+              headers: {
+                Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+                "Content-Type": "application/x-www-form-urlencoded",
+              },
+              body: new URLSearchParams({
+                filename: filename,
+                length: imageBuffer.length,
               }),
-            });
+            }
+          );
+
+          const uploadUrlResult = await uploadUrlResponse.json();
+          console.log("업로드 URL 응답:", JSON.stringify(uploadUrlResult));
+
+          if (!uploadUrlResult.ok) {
+            throw new Error(
+              `업로드 URL 가져오기 실패: ${uploadUrlResult.error}`
+            );
           }
-          return;
-        }
 
-        // FormData 객체 생성
-        const formData = new FormData();
-        formData.append("file", imageBuffer, {
-          filename: `random-${width}x${height}-${Date.now()}.jpg`,
-          contentType: "image/jpeg",
-        });
-        formData.append("channels", channel_id);
-        formData.append(
-          "initial_comment",
-          `*${width}x${height}* 크기의 랜덤 이미지입니다!`
-        );
+          const { upload_url, file_id } = uploadUrlResult;
 
-        // 슬랙 API로 이미지 업로드
-        console.log(`슬랙 채널 ${channel_id}에 이미지 업로드 중...`);
-        const uploadResponse = await fetch(
-          "https://slack.com/api/files.upload",
-          {
+          // 2. 파일 업로드
+          console.log(`파일 업로드 중... (${upload_url})`);
+          const formData = new FormData();
+          formData.append("file", imageBuffer, {
+            filename: filename,
+            contentType: "image/jpeg",
+          });
+
+          const uploadResponse = await fetch(upload_url, {
             method: "POST",
-            headers: {
-              Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
-            },
             body: formData,
+          });
+
+          if (!uploadResponse.ok) {
+            throw new Error(`파일 업로드 실패: ${uploadResponse.statusText}`);
           }
-        );
 
-        const uploadResult = await uploadResponse.json();
-        console.log("슬랙 업로드 응답:", JSON.stringify(uploadResult));
+          console.log("파일 업로드 성공");
 
-        if (!uploadResult.ok) {
-          console.error("슬랙 업로드 오류:", uploadResult.error);
+          // 3. 업로드 완료 및 채널에 공유
+          console.log(`업로드 완료 요청 중... (file_id: ${file_id})`);
+          const completeResponse = await fetch(
+            "https://slack.com/api/files.completeUploadExternal",
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                files: [
+                  { id: file_id, title: `랜덤 이미지 ${width}x${height}` },
+                ],
+                channel_id: channel_id,
+                initial_comment: `*${width}x${height}* 크기의 랜덤 이미지입니다!`,
+              }),
+            }
+          );
+
+          const completeResult = await completeResponse.json();
+          console.log("업로드 완료 응답:", JSON.stringify(completeResult));
+
+          if (!completeResult.ok) {
+            throw new Error(`업로드 완료 실패: ${completeResult.error}`);
+          }
+
+          console.log("파일 업로드 및 공유 완료");
+        } catch (uploadError) {
+          console.error("슬랙 파일 업로드 오류:", uploadError);
 
           // 업로드 실패 시 대체 방법으로 이미지 URL과 다운로드 버튼 제공
           if (response_url) {
@@ -238,7 +269,7 @@ app.post("/api/slack-command", async (req, res) => {
                     type: "section",
                     text: {
                       type: "mrkdwn",
-                      text: `*${width}x${height}* 크기의 랜덤 이미지입니다!\n\n*참고*: 봇이 파일을 직접 업로드하려면 해당 채널에 초대되어 있어야 합니다. 오류: ${uploadResult.error}`,
+                      text: `*${width}x${height}* 크기의 랜덤 이미지입니다!\n\n*참고*: 파일 업로드 중 오류가 발생했습니다: ${uploadError.message}`,
                     },
                   },
                   {
