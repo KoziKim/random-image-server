@@ -128,6 +128,7 @@ app.post("/api/slack-command", async (req, res) => {
       req.body;
 
     console.log(`슬랙 명령어 수신: ${command} by ${user_name} (${user_id})`);
+    console.log(`채널 ID: ${channel_id}, 응답 URL: ${response_url}`);
     console.log(`요청 데이터:`, req.body);
 
     // 기본 이미지 크기 설정
@@ -148,65 +149,183 @@ app.post("/api/slack-command", async (req, res) => {
     });
 
     try {
-      // 고유한 ID 생성
-      const imageId = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+      // 랜덤 시드 생성 (동일한 이미지를 보장하기 위해)
+      const randomSeed = Math.floor(Math.random() * 1000);
 
       // 이미지 URL 생성
-      const imageUrl = `https://picsum.photos/${width}/${height}?random=${Math.floor(
-        Math.random() * 1000
-      )}`;
-
-      // 다운로드 URL 생성
-      const downloadUrl = `${req.protocol}://${req.get(
-        "host"
-      )}/api/download-image?width=${width}&height=${height}&id=${imageId}`;
+      const imageUrl = `https://picsum.photos/${width}/${height}?random=${randomSeed}`;
 
       console.log(`이미지 URL 생성: ${imageUrl}`);
-      console.log(`다운로드 URL 생성: ${downloadUrl}`);
 
-      // 이미지를 응답 URL을 통해 전송 (더 안정적인 방법)
-      if (response_url) {
-        console.log("응답 URL을 통해 메시지 전송");
-        await fetch(response_url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            response_type: "in_channel",
-            blocks: [
-              {
-                type: "section",
-                text: {
-                  type: "mrkdwn",
-                  text: `*${width}x${height}* 크기의 랜덤 이미지입니다!`,
-                },
-              },
-              {
-                type: "image",
-                title: {
-                  type: "plain_text",
-                  text: "랜덤 이미지",
-                },
-                image_url: imageUrl,
-                alt_text: "랜덤 이미지",
-              },
-              {
-                type: "actions",
-                elements: [
+      // 이미지 가져오기
+      console.log("이미지 다운로드 시작...");
+      const imageResponse = await fetch(imageUrl);
+      const imageBuffer = await imageResponse.buffer();
+      console.log(`이미지 다운로드 완료: ${imageBuffer.length} bytes`);
+
+      // 슬랙 API를 사용하여 이미지 직접 업로드 (파일 업로드)
+      if (SLACK_BOT_TOKEN) {
+        console.log("슬랙에 이미지 업로드 시도...");
+
+        // 채널 ID가 있는지 확인
+        if (!channel_id) {
+          console.error("채널 ID가 없습니다. 응답 URL로 메시지만 전송합니다.");
+          if (response_url) {
+            await fetch(response_url, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                response_type: "in_channel",
+                text: `${width}x${height} 크기의 랜덤 이미지: ${imageUrl}`,
+              }),
+            });
+          }
+          return;
+        }
+
+        // FormData 객체 생성
+        const formData = new FormData();
+        formData.append("file", imageBuffer, {
+          filename: `random-${width}x${height}-${Date.now()}.jpg`,
+          contentType: "image/jpeg",
+        });
+        formData.append("channels", channel_id);
+        formData.append(
+          "initial_comment",
+          `*${width}x${height}* 크기의 랜덤 이미지입니다!`
+        );
+
+        // 슬랙 API로 이미지 업로드
+        console.log(`슬랙 채널 ${channel_id}에 이미지 업로드 중...`);
+        const uploadResponse = await fetch(
+          "https://slack.com/api/files.upload",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+            },
+            body: formData,
+          }
+        );
+
+        const uploadResult = await uploadResponse.json();
+        console.log("슬랙 업로드 응답:", JSON.stringify(uploadResult));
+
+        if (!uploadResult.ok) {
+          console.error("슬랙 업로드 오류:", uploadResult.error);
+
+          // 업로드 실패 시 대체 방법으로 이미지 URL과 다운로드 버튼 제공
+          if (response_url) {
+            console.log("대체 방법으로 이미지 URL과 다운로드 버튼 제공");
+
+            // 고유한 ID 생성
+            const imageId = `${Date.now()}-${crypto
+              .randomBytes(4)
+              .toString("hex")}`;
+
+            // 다운로드 URL 생성
+            const downloadUrl = `${req.protocol}://${req.get(
+              "host"
+            )}/api/download-image?width=${width}&height=${height}&id=${imageId}&seed=${randomSeed}`;
+
+            await fetch(response_url, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                response_type: "in_channel",
+                blocks: [
                   {
-                    type: "button",
+                    type: "section",
                     text: {
-                      type: "plain_text",
-                      text: "이미지 다운로드",
+                      type: "mrkdwn",
+                      text: `*${width}x${height}* 크기의 랜덤 이미지입니다!\n\n*참고*: 봇이 파일을 직접 업로드하려면 해당 채널에 초대되어 있어야 합니다. 오류: ${uploadResult.error}`,
                     },
-                    url: downloadUrl,
-                    action_id: "download_image",
+                  },
+                  {
+                    type: "image",
+                    title: {
+                      type: "plain_text",
+                      text: "랜덤 이미지",
+                    },
+                    image_url: imageUrl,
+                    alt_text: "랜덤 이미지",
+                  },
+                  {
+                    type: "actions",
+                    elements: [
+                      {
+                        type: "button",
+                        text: {
+                          type: "plain_text",
+                          text: "이미지 다운로드",
+                        },
+                        url: downloadUrl,
+                        action_id: "download_image",
+                      },
+                    ],
                   },
                 ],
-              },
-            ],
-          }),
-        });
-        console.log("메시지 전송 완료");
+              }),
+            });
+          }
+        }
+      } else {
+        console.log(
+          "SLACK_BOT_TOKEN이 설정되지 않았습니다. 이미지 URL만 전송합니다."
+        );
+
+        // 토큰이 없는 경우 응답 URL로 이미지 URL만 전송
+        if (response_url) {
+          // 고유한 ID 생성
+          const imageId = `${Date.now()}-${crypto
+            .randomBytes(4)
+            .toString("hex")}`;
+
+          // 다운로드 URL 생성
+          const downloadUrl = `${req.protocol}://${req.get(
+            "host"
+          )}/api/download-image?width=${width}&height=${height}&id=${imageId}&seed=${randomSeed}`;
+
+          await fetch(response_url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              response_type: "in_channel",
+              blocks: [
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: `*${width}x${height}* 크기의 랜덤 이미지입니다!`,
+                  },
+                },
+                {
+                  type: "image",
+                  title: {
+                    type: "plain_text",
+                    text: "랜덤 이미지",
+                  },
+                  image_url: imageUrl,
+                  alt_text: "랜덤 이미지",
+                },
+                {
+                  type: "actions",
+                  elements: [
+                    {
+                      type: "button",
+                      text: {
+                        type: "plain_text",
+                        text: "이미지 다운로드",
+                      },
+                      url: downloadUrl,
+                      action_id: "download_image",
+                    },
+                  ],
+                },
+              ],
+            }),
+          });
+        }
       }
     } catch (error) {
       console.error("이미지 처리 오류:", error);
@@ -240,11 +359,10 @@ app.get("/api/download-image", async (req, res) => {
     const width = req.query.width || 500;
     const height = req.query.height || 500;
     const id = req.query.id || Date.now();
+    const seed = req.query.seed || Math.floor(Math.random() * 1000);
 
-    // 랜덤 이미지 URL 생성
-    const imageUrl = `https://picsum.photos/${width}/${height}?random=${Math.floor(
-      Math.random() * 1000
-    )}`;
+    // 동일한 랜덤 시드를 사용하여 동일한 이미지 URL 생성
+    const imageUrl = `https://picsum.photos/${width}/${height}?random=${seed}`;
 
     console.log(`다운로드 요청 처리: ${imageUrl}`);
 
