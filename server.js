@@ -131,233 +131,42 @@ app.post("/api/slack-command", async (req, res) => {
     console.log(`채널 ID: ${channel_id}, 응답 URL: ${response_url}`);
     console.log(`요청 데이터:`, req.body);
 
-    // 기본 이미지 크기 설정
+    // 기본 이미지 크기 및 갯수 설정
     let width = 500;
     let height = 500;
+    let count = 1; // 기본값은 이미지 1개
 
-    // 사용자가 크기를 입력했는지 확인
+    // 사용자가 크기와 갯수를 입력했는지 확인
     if (text && text.trim()) {
-      const dimensions = text.split(" ");
-      if (dimensions.length >= 1) width = parseInt(dimensions[0]) || 500;
-      if (dimensions.length >= 2) height = parseInt(dimensions[1]) || 500;
+      const params = text.split(" ");
+      if (params.length >= 1) width = parseInt(params[0]) || 500;
+      if (params.length >= 2) height = parseInt(params[1]) || 500;
+      if (params.length >= 3) {
+        count = parseInt(params[2]) || 1;
+        // 너무 많은 이미지 요청 제한 (최대 5개)
+        count = Math.min(count, 5);
+      }
     }
 
     // 즉시 응답 (슬랙 타임아웃 방지)
     res.status(200).send({
       response_type: "in_channel",
-      text: `${width}x${height} 크기의 랜덤 이미지를 생성 중입니다...`,
+      text: `${width}x${height} 크기의 랜덤 이미지 ${count}개를 생성 중입니다...`,
     });
 
     try {
-      // 랜덤 시드 생성 (동일한 이미지를 보장하기 위해)
-      const randomSeed = Math.floor(Math.random() * 1000);
+      // 여러 이미지 처리를 위한 배열
+      const imagePromises = [];
 
-      // 이미지 URL 생성
-      const imageUrl = `https://picsum.photos/${width}/${height}?random=${randomSeed}`;
-
-      console.log(`이미지 URL 생성: ${imageUrl}`);
-
-      // 이미지 다운로드
-      console.log("이미지 다운로드 시작...");
-      const imageResponse = await fetch(imageUrl);
-      const imageBuffer = await imageResponse.buffer();
-      console.log(`이미지 다운로드 완료: ${imageBuffer.length} bytes`);
-
-      if (SLACK_BOT_TOKEN) {
-        try {
-          // 1. 파일 업로드 URL 가져오기
-          console.log("슬랙 파일 업로드 URL 요청 중...");
-          const filename = `random-${width}x${height}-${Date.now()}.jpg`;
-
-          const uploadUrlResponse = await fetch(
-            "https://slack.com/api/files.getUploadURLExternal",
-            {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
-                "Content-Type": "application/x-www-form-urlencoded",
-              },
-              body: new URLSearchParams({
-                filename: filename,
-                length: imageBuffer.length,
-              }),
-            }
-          );
-
-          const uploadUrlResult = await uploadUrlResponse.json();
-          console.log("업로드 URL 응답:", JSON.stringify(uploadUrlResult));
-
-          if (!uploadUrlResult.ok) {
-            throw new Error(
-              `업로드 URL 가져오기 실패: ${uploadUrlResult.error}`
-            );
-          }
-
-          const { upload_url, file_id } = uploadUrlResult;
-
-          // 2. 파일 업로드
-          console.log(`파일 업로드 중... (${upload_url})`);
-          const formData = new FormData();
-          formData.append("file", imageBuffer, {
-            filename: filename,
-            contentType: "image/jpeg",
-          });
-
-          const uploadResponse = await fetch(upload_url, {
-            method: "POST",
-            body: formData,
-          });
-
-          if (!uploadResponse.ok) {
-            throw new Error(`파일 업로드 실패: ${uploadResponse.statusText}`);
-          }
-
-          console.log("파일 업로드 성공");
-
-          // 3. 업로드 완료 및 채널에 공유
-          console.log(`업로드 완료 요청 중... (file_id: ${file_id})`);
-          const completeResponse = await fetch(
-            "https://slack.com/api/files.completeUploadExternal",
-            {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                files: [
-                  { id: file_id, title: `랜덤 이미지 ${width}x${height}` },
-                ],
-                channel_id: channel_id,
-                initial_comment: `*${width}x${height}* 크기의 랜덤 이미지입니다!`,
-              }),
-            }
-          );
-
-          const completeResult = await completeResponse.json();
-          console.log("업로드 완료 응답:", JSON.stringify(completeResult));
-
-          if (!completeResult.ok) {
-            throw new Error(`업로드 완료 실패: ${completeResult.error}`);
-          }
-
-          console.log("파일 업로드 및 공유 완료");
-        } catch (uploadError) {
-          console.error("슬랙 파일 업로드 오류:", uploadError);
-
-          // 업로드 실패 시 대체 방법으로 이미지 URL과 다운로드 버튼 제공
-          if (response_url) {
-            console.log("대체 방법으로 이미지 URL과 다운로드 버튼 제공");
-
-            // 고유한 ID 생성
-            const imageId = `${Date.now()}-${crypto
-              .randomBytes(4)
-              .toString("hex")}`;
-
-            // 다운로드 URL 생성
-            const downloadUrl = `${req.protocol}://${req.get(
-              "host"
-            )}/api/download-image?width=${width}&height=${height}&id=${imageId}&seed=${randomSeed}`;
-
-            await fetch(response_url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                response_type: "in_channel",
-                blocks: [
-                  {
-                    type: "section",
-                    text: {
-                      type: "mrkdwn",
-                      text: `*${width}x${height}* 크기의 랜덤 이미지입니다!\n\n*참고*: 파일 업로드 중 오류가 발생했습니다: ${uploadError.message}`,
-                    },
-                  },
-                  {
-                    type: "image",
-                    title: {
-                      type: "plain_text",
-                      text: "랜덤 이미지",
-                    },
-                    image_url: imageUrl,
-                    alt_text: "랜덤 이미지",
-                  },
-                  {
-                    type: "actions",
-                    elements: [
-                      {
-                        type: "button",
-                        text: {
-                          type: "plain_text",
-                          text: "이미지 다운로드",
-                        },
-                        url: downloadUrl,
-                        action_id: "download_image",
-                      },
-                    ],
-                  },
-                ],
-              }),
-            });
-          }
-        }
-      } else {
-        console.log(
-          "SLACK_BOT_TOKEN이 설정되지 않았습니다. 이미지 URL만 전송합니다."
+      // 요청된 갯수만큼 이미지 생성 작업 추가
+      for (let i = 0; i < count; i++) {
+        imagePromises.push(
+          processImage(req, width, height, channel_id, response_url, i)
         );
-
-        // 토큰이 없는 경우 응답 URL로 이미지 URL만 전송
-        if (response_url) {
-          // 고유한 ID 생성
-          const imageId = `${Date.now()}-${crypto
-            .randomBytes(4)
-            .toString("hex")}`;
-
-          // 다운로드 URL 생성
-          const downloadUrl = `${req.protocol}://${req.get(
-            "host"
-          )}/api/download-image?width=${width}&height=${height}&id=${imageId}&seed=${randomSeed}`;
-
-          await fetch(response_url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              response_type: "in_channel",
-              blocks: [
-                {
-                  type: "section",
-                  text: {
-                    type: "mrkdwn",
-                    text: `*${width}x${height}* 크기의 랜덤 이미지입니다!`,
-                  },
-                },
-                {
-                  type: "image",
-                  title: {
-                    type: "plain_text",
-                    text: "랜덤 이미지",
-                  },
-                  image_url: imageUrl,
-                  alt_text: "랜덤 이미지",
-                },
-                {
-                  type: "actions",
-                  elements: [
-                    {
-                      type: "button",
-                      text: {
-                        type: "plain_text",
-                        text: "이미지 다운로드",
-                      },
-                      url: downloadUrl,
-                      action_id: "download_image",
-                    },
-                  ],
-                },
-              ],
-            }),
-          });
-        }
       }
+
+      // 모든 이미지 처리 작업 실행
+      await Promise.all(imagePromises);
     } catch (error) {
       console.error("이미지 처리 오류:", error);
       // 오류 발생 시 메시지 업데이트
@@ -383,6 +192,256 @@ app.post("/api/slack-command", async (req, res) => {
     }
   }
 });
+
+// 이미지 처리 함수 (각 이미지를 개별적으로 처리)
+async function processImage(
+  req,
+  width,
+  height,
+  channel_id,
+  response_url,
+  index
+) {
+  try {
+    // 랜덤 시드 생성 (동일한 이미지를 보장하기 위해)
+    const randomSeed = Math.floor(Math.random() * 1000);
+
+    // 이미지 URL 생성
+    const imageUrl = `https://picsum.photos/${width}/${height}?random=${randomSeed}`;
+
+    console.log(`이미지 #${index + 1} URL 생성: ${imageUrl}`);
+
+    // 이미지 다운로드
+    console.log(`이미지 #${index + 1} 다운로드 시작...`);
+    const imageResponse = await fetch(imageUrl);
+    const imageBuffer = await imageResponse.buffer();
+    console.log(
+      `이미지 #${index + 1} 다운로드 완료: ${imageBuffer.length} bytes`
+    );
+
+    if (SLACK_BOT_TOKEN) {
+      try {
+        // 1. 파일 업로드 URL 가져오기
+        console.log(`이미지 #${index + 1} 슬랙 파일 업로드 URL 요청 중...`);
+        const filename = `random-${width}x${height}-${Date.now()}-${index}.jpg`;
+
+        const uploadUrlResponse = await fetch(
+          "https://slack.com/api/files.getUploadURLExternal",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: new URLSearchParams({
+              filename: filename,
+              length: imageBuffer.length,
+            }),
+          }
+        );
+
+        const uploadUrlResult = await uploadUrlResponse.json();
+        console.log(
+          `이미지 #${index + 1} 업로드 URL 응답:`,
+          JSON.stringify(uploadUrlResult)
+        );
+
+        if (!uploadUrlResult.ok) {
+          throw new Error(`업로드 URL 가져오기 실패: ${uploadUrlResult.error}`);
+        }
+
+        const { upload_url, file_id } = uploadUrlResult;
+
+        // 2. 파일 업로드
+        console.log(`이미지 #${index + 1} 파일 업로드 중... (${upload_url})`);
+        const formData = new FormData();
+        formData.append("file", imageBuffer, {
+          filename: filename,
+          contentType: "image/jpeg",
+        });
+
+        const uploadResponse = await fetch(upload_url, {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!uploadResponse.ok) {
+          throw new Error(`파일 업로드 실패: ${uploadResponse.statusText}`);
+        }
+
+        console.log(`이미지 #${index + 1} 파일 업로드 성공`);
+
+        // 3. 업로드 완료 및 채널에 공유
+        console.log(
+          `이미지 #${index + 1} 업로드 완료 요청 중... (file_id: ${file_id})`
+        );
+        const completeResponse = await fetch(
+          "https://slack.com/api/files.completeUploadExternal",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              files: [
+                {
+                  id: file_id,
+                  title: `랜덤 이미지 ${width}x${height} #${index + 1}`,
+                },
+              ],
+              channel_id: channel_id,
+              initial_comment:
+                index === 0
+                  ? `*${width}x${height}* 크기의 랜덤 이미지 #${index + 1}`
+                  : undefined,
+            }),
+          }
+        );
+
+        const completeResult = await completeResponse.json();
+        console.log(
+          `이미지 #${index + 1} 업로드 완료 응답:`,
+          JSON.stringify(completeResult)
+        );
+
+        if (!completeResult.ok) {
+          throw new Error(`업로드 완료 실패: ${completeResult.error}`);
+        }
+
+        console.log(`이미지 #${index + 1} 파일 업로드 및 공유 완료`);
+      } catch (uploadError) {
+        console.error(
+          `이미지 #${index + 1} 슬랙 파일 업로드 오류:`,
+          uploadError
+        );
+
+        // 업로드 실패 시 대체 방법으로 이미지 URL과 다운로드 버튼 제공
+        if (response_url && index === 0) {
+          // 첫 번째 이미지에 대해서만 응답 URL로 메시지 전송
+          console.log("대체 방법으로 이미지 URL과 다운로드 버튼 제공");
+
+          // 고유한 ID 생성
+          const imageId = `${Date.now()}-${crypto
+            .randomBytes(4)
+            .toString("hex")}`;
+
+          // 다운로드 URL 생성
+          const downloadUrl = `${req.protocol}://${req.get(
+            "host"
+          )}/api/download-image?width=${width}&height=${height}&id=${imageId}&seed=${randomSeed}`;
+
+          await fetch(response_url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              response_type: "in_channel",
+              blocks: [
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: `*${width}x${height}* 크기의 랜덤 이미지 #${
+                      index + 1
+                    }\n\n*참고*: 파일 업로드 중 오류가 발생했습니다: ${
+                      uploadError.message
+                    }`,
+                  },
+                },
+                {
+                  type: "image",
+                  title: {
+                    type: "plain_text",
+                    text: `랜덤 이미지 #${index + 1}`,
+                  },
+                  image_url: imageUrl,
+                  alt_text: `랜덤 이미지 #${index + 1}`,
+                },
+                {
+                  type: "actions",
+                  elements: [
+                    {
+                      type: "button",
+                      text: {
+                        type: "plain_text",
+                        text: "이미지 다운로드",
+                      },
+                      url: downloadUrl,
+                      action_id: "download_image",
+                    },
+                  ],
+                },
+              ],
+            }),
+          });
+        }
+      }
+    } else {
+      console.log(
+        "SLACK_BOT_TOKEN이 설정되지 않았습니다. 이미지 URL만 전송합니다."
+      );
+
+      // 토큰이 없는 경우 응답 URL로 이미지 URL만 전송
+      if (response_url && index === 0) {
+        // 첫 번째 이미지에 대해서만 응답 URL로 메시지 전송
+        // 고유한 ID 생성
+        const imageId = `${Date.now()}-${crypto
+          .randomBytes(4)
+          .toString("hex")}`;
+
+        // 다운로드 URL 생성
+        const downloadUrl = `${req.protocol}://${req.get(
+          "host"
+        )}/api/download-image?width=${width}&height=${height}&id=${imageId}&seed=${randomSeed}`;
+
+        await fetch(response_url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            response_type: "in_channel",
+            blocks: [
+              {
+                type: "section",
+                text: {
+                  type: "mrkdwn",
+                  text: `*${width}x${height}* 크기의 랜덤 이미지 #${index + 1}`,
+                },
+              },
+              {
+                type: "image",
+                title: {
+                  type: "plain_text",
+                  text: `랜덤 이미지 #${index + 1}`,
+                },
+                image_url: imageUrl,
+                alt_text: `랜덤 이미지 #${index + 1}`,
+              },
+              {
+                type: "actions",
+                elements: [
+                  {
+                    type: "button",
+                    text: {
+                      type: "plain_text",
+                      text: "이미지 다운로드",
+                    },
+                    url: downloadUrl,
+                    action_id: "download_image",
+                  },
+                ],
+              },
+            ],
+          }),
+        });
+      }
+    }
+
+    return true;
+  } catch (error) {
+    console.error(`이미지 #${index + 1} 처리 중 오류:`, error);
+    throw error;
+  }
+}
 
 // 이미지 다운로드 API 엔드포인트 (슬랙 버튼용)
 app.get("/api/download-image", async (req, res) => {
